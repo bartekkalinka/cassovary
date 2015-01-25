@@ -19,6 +19,7 @@ import com.twitter.util.NonFatal
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import scala.io.Source
+import scala.util.matching.Regex
 
 /**
  * Reads in a multi-line adjacency list from multiple files in a directory, where ids are of type T.
@@ -57,16 +58,22 @@ import scala.io.Source
  * @param idReader function that can read id from String
  */
 class AdjacencyListGraphReader[T] (
-  val directory: String,
-  override val prefixFileNames: String = "",
-  val nodeNumberer: NodeNumberer[T],
-  idReader: (String => T)
-) extends GraphReaderFromDirectory[T] {
+                                    val directory: String,
+                                    override val prefixFileNames: String = "",
+                                    val nodeNumberer: NodeNumberer[T],
+                                    idReader: (String => T)
+                                    ) extends GraphReaderFromDirectory[T] {
 
   /**
    * Separator between node ids forming edge.
    */
   protected val separator = " "
+
+  protected def outEdgePatternLineParse(line: String): (String, String) = {
+    val outEdgePattern = ("""^(\w+)""" + separator + """(\d+)""").r
+    val outEdgePattern(id, outEdgeCount) = line
+    (id, outEdgeCount)
+  }
 
   /**
    * Read in nodes and edges from a single file
@@ -75,7 +82,6 @@ class AdjacencyListGraphReader[T] (
   private class OneShardReader(filename: String, nodeNumberer: NodeNumberer[T])
     extends Iterator[NodeIdEdgesMaxId] {
 
-    private val outEdgePattern = ("""^(\w+)""" + separator + """(\d+)""").r
     var lastLineParsed = 0
     private val lines = Source.fromFile(filename).getLines()
       .map{x => {lastLineParsed += 1; x}}
@@ -86,25 +92,25 @@ class AdjacencyListGraphReader[T] (
     override def next(): NodeIdEdgesMaxId = {
       var i = 0
       try {
-        val outEdgePattern(id, outEdgeCount) = lines.next().trim
+        val (id, outEdgeCount) = outEdgePatternLineParse(lines.next().trim)
         val outEdgeCountInt = outEdgeCount.toInt
         val externalNodeId = idReader(id)
         val internalNodeId = nodeNumberer.externalToInternal(externalNodeId)
 
         var newMaxId = internalNodeId
         val outEdgesArr = new Array[Int](outEdgeCountInt)
-          while (i < outEdgeCountInt) {
-            val externalNghId = idReader(lines.next().trim)
-            val internalNghId = nodeNumberer.externalToInternal(externalNghId)
-            newMaxId = newMaxId max internalNghId
-            outEdgesArr(i) = internalNghId
-            i += 1
-          }
+        while (i < outEdgeCountInt) {
+          val externalNghId = idReader(lines.next().trim)
+          val internalNghId = nodeNumberer.externalToInternal(externalNghId)
+          newMaxId = newMaxId max internalNghId
+          outEdgesArr(i) = internalNghId
+          i += 1
+        }
 
-          holder.id = internalNodeId
-          holder.edges = outEdgesArr
-          holder.maxId = newMaxId
-          holder
+        holder.id = internalNodeId
+        holder.edges = outEdgesArr
+        holder.maxId = newMaxId
+        holder
       } catch {
         case NonFatal(exc) =>
           throw new IOException("Parsing failed near line: %d in %s"
@@ -123,5 +129,10 @@ object AdjacencyListGraphReader {
                 nodeNumberer: NodeNumberer[Int] = new NodeNumberer.IntIdentity()) =
     new AdjacencyListGraphReader[Int](directory, prefixFileNames, nodeNumberer, _.toInt) {
       override val executorService = threadPool
+
+      override def outEdgePatternLineParse(line: String): (String, String) = {
+        val id :: outEdgeCount :: _ = line.split(separator.charAt(0)).toList
+        (id, outEdgeCount)
+      }
     }
 }
